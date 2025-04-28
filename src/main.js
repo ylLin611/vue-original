@@ -1,39 +1,52 @@
-import "./style.css";
-
-const obj = {
-  foo: 1,
-};
-
-// 存放 target => key => effect
-const bucket = new WeakMap();
+const obj = { a: 1, b: 2 };
 
 let activeEffect;
+// 创建副作用函数栈，通过副作用函数出栈|入栈，解决嵌套时函数执行问题
 const effectStack = [];
+// 处理副作用函数
 const effect = (fn, options = {}) => {
   const effectFn = () => {
+    // 清空Set集合中此effect,并将deps置空
     cleanup(effectFn);
     activeEffect = effectFn;
-    // 把当前effect压入栈中
+    // 入栈
     effectStack.push(effectFn);
-    // 执行effect
-    fn();
-    // 执行完effect之后，把当前effect从栈中弹出
+    const res = fn();
+    // 出栈，并恢复activeEffect为上层的effect
     effectStack.pop();
     activeEffect = effectStack[effectStack.length - 1];
+    return res;
   };
+  // 存放依赖了此effect的Set集合
   effectFn.deps = [];
-  // 将options挂载到effectFn上
   effectFn.options = options;
-  effectFn();
-};
-
-const cleanup = (effectFn) => {
-  for (let i = 0; i < effectFn.deps.length; i++) {
-    effectFn.deps[i].delete(effectFn);
+  // 可以传入lazy属性，若存在lazy则不执行，通过返回值手动调用effectFn
+  if (!options.lazy) {
+    effectFn();
   }
+  return effectFn;
+};
+const cleanup = (effectFn) => {
+  effectFn.deps.forEach((dep) => {
+    dep.delete(effectFn);
+  });
   effectFn.deps.length = 0;
 };
 
+// 创建一个桶，树形结构存放 对象=>key=>副作用函数 的映射关系
+const bucket = new WeakMap();
+const proxy = new Proxy(obj, {
+  get(target, key) {
+    track(target, key);
+    return target[key];
+  },
+  set(target, key, newVal) {
+    target[key] = newVal;
+    trigger(target, key);
+    return true;
+  },
+});
+// 收集依赖
 const track = (target, key) => {
   if (!activeEffect) return;
   let depsMap = bucket.get(target);
@@ -47,19 +60,20 @@ const track = (target, key) => {
   deps.add(activeEffect);
   activeEffect.deps.push(deps);
 };
-
+// 触发依赖
 const trigger = (target, key) => {
   const depsMap = bucket.get(target);
   if (!depsMap) return;
   const deps = depsMap.get(key);
+  // 创建一个新Set集合，存放要执行的effect
   const effects = new Set();
-  // 新增判断，只有副作用函数与当前正在执行的不同时，才执行
   deps &&
-    deps.forEach((fn) => {
-      if (fn !== activeEffect) {
-        effects.add(fn);
+    deps.forEach((effectFn) => {
+      if (effectFn !== activeEffect) {
+        effects.add(effectFn);
       }
     });
+
   effects.forEach((fn) => {
     // trigger时判断若存在scheduler，则执行scheduler
     if (fn.options.scheduler) {
@@ -70,46 +84,36 @@ const trigger = (target, key) => {
   });
 };
 
-const proxy = new Proxy(obj, {
-  get(target, key) {
-    // get的时候做track，也就是把effect func添加到桶里
-    track(target, key);
-    return Reflect.get(target, key);
-  },
-  set(target, key, value) {
-    Reflect.set(target, key, value);
-    // set的时候做trigger,也就是执行 effect func
-    trigger(target, key);
-    return true;
-  },
-});
-
-const jobQueue = new Set();
-const p = Promise.resolve();
-
-let isRunning = false;
-const runJob = () => {
-  if (isRunning) return;
-  isRunning = true;
-  // 微任务在上次宏任务全部执行后执行
-  p.then(() => {
-    jobQueue.forEach((fn) => fn());
-  }).finally(() => {
-    isRunning = false;
-  });
-};
-
-effect(
-  () => {
-    console.log(proxy.foo);
-  },
-  {
-    scheduler(fn) {
-      jobQueue.add(fn);
-      runJob();
+function computed(getter) {
+  let value;
+  // dirty标识是否需要重新计算
+  let dirty = true;
+  const effectFn = effect(getter, {
+    lazy: true,
+    scheduler() {
+      // scheduler 是在set拦截器中trigger时调用，所以能识别到依赖项的变化
+      dirty = true;
+      // 防止computed里嵌套computed
+      trigger(obj, "value");
     },
-  }
-);
+  });
+  const obj = {
+    get value() {
+      // 只有dirty为true时才执行effectFn获取结果
+      if (dirty) {
+        value = effectFn();
+        dirty = false;
+      }
+      // 防止computed里嵌套computed
+      track(obj, "value");
+      return value;
+    },
+  };
+  return obj;
+}
 
-proxy.foo++;
-proxy.foo++;
+const test = computed(() => proxy.a + proxy.b);
+console.log(test.value);
+console.log(test.value);
+proxy.b = 3;
+console.log(test.value);
