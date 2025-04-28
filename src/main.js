@@ -1,7 +1,7 @@
 import "./style.css";
 
 const obj = {
-  foo: true,
+  foo: 1,
 };
 
 // 存放 target => key => effect
@@ -84,7 +84,32 @@ const proxy = new Proxy(obj, {
   },
 });
 
-effect(() => {
-  proxy.foo = proxy.foo + "test";
-  console.log(proxy.foo);
-});
+const jobQueue = new Set();
+const p = Promise.resolve();
+
+let isRunning = false;
+const runJob = () => {
+  if (isRunning) return;
+  isRunning = true;
+  // 微任务在上次宏任务全部执行后执行
+  p.then(() => {
+    jobQueue.forEach((fn) => fn());
+  }).finally(() => {
+    isRunning = false;
+  });
+};
+
+effect(
+  () => {
+    console.log(proxy.foo);
+  },
+  {
+    scheduler(fn) {
+      jobQueue.add(fn);
+      runJob();
+    },
+  }
+);
+
+proxy.foo++;
+proxy.foo++;
